@@ -1,98 +1,88 @@
 package org.example.jsprr;
 
 import java.io.*;
+import java.nio.file.*;
 import java.util.*;
+import java.util.stream.*;
 
+/**
+ * JSPRR Simulation that reads all inputs from dataset CSV files.
+ */
 public class MainJSPRRSimulation {
 
     public static void main(String[] args) throws Exception {
-        // ========================
-        // 1. Load Base Stations and Cloud from CSV
-        // ========================
-        Map<String, BaseStationDevice> deviceMap = new HashMap<>();
+        String datasetDir = "data/jsprr_dataset_extended"; // path where CSVs are extracted
+
+        // ========= 1. Load Base Stations =========
         List<BaseStationDevice> bases = new ArrayList<>();
-
-        try (BufferedReader br = new BufferedReader(new FileReader("base_stations.csv"))) {
-            String line = br.readLine(); // skip header
+        try (BufferedReader br = Files.newBufferedReader(Paths.get(datasetDir, "bs_nodes_extended.csv"))) {
+            String header = br.readLine(); // skip header
+            String line;
             while ((line = br.readLine()) != null) {
-                String[] parts = line.split(",");
-                String id = parts[0];
-                int storage = Integer.parseInt(parts[1]);
-                int compute = Integer.parseInt(parts[2]);
-                int ram = Integer.parseInt(parts[3]);
-                int bw = Integer.parseInt(parts[4]);
-                boolean isCloud = Boolean.parseBoolean(parts[5]);
-                int cloudLatency = Integer.parseInt(parts[6]);
-
-                BaseStationDevice dev;
-                if (isCloud) {
-                    dev = new CloudDevice(id, storage, compute, ram, bw, cloudLatency);
-                } else {
-                    dev = new BaseStationDevice(id, storage, compute, ram, bw);
-                }
-                bases.add(dev);
-                deviceMap.put(id, dev);
+                String[] v = line.split(",");
+                String id = v[0].trim();
+                double cpu = Double.parseDouble(v[1]);
+                double mem = Double.parseDouble(v[2]);
+                double energy = Double.parseDouble(v[3]);
+                double latency = Double.parseDouble(v[4]);
+                BaseStationDevice bs = new BaseStationDevice(id, cpu, mem, energy, latency);
+                bases.add(bs);
             }
         }
 
-        // ========================
-        // 2. Load Network Topology
-        // ========================
+        // ========= 2. Load Network Topology =========
         NetworkTopology topo = new NetworkTopology();
         for (BaseStationDevice b : bases) topo.addNode(b);
 
-        try (BufferedReader br = new BufferedReader(new FileReader("links.csv"))) {
-            String line = br.readLine();
+        try (BufferedReader br = Files.newBufferedReader(Paths.get(datasetDir, "links.csv"))) {
+            String header = br.readLine();
+            String line;
             while ((line = br.readLine()) != null) {
-                String[] parts = line.split(",");
-                String id = parts[0];
-                BaseStationDevice from = deviceMap.get(parts[1]);
-                BaseStationDevice to = deviceMap.get(parts[2]);
-                double cap = Double.parseDouble(parts[3]);
-                double lat = Double.parseDouble(parts[4]);
-                topo.addLink(new Link(id, from, to, cap, lat));
+                String[] v = line.split(",");
+                String id = v[0];
+                String srcId = v[1];
+                String dstId = v[2];
+                double cap = Double.parseDouble(v[3]);
+                double lat = Double.parseDouble(v[4]);
+                BaseStationDevice src = findBase(bases, srcId);
+                BaseStationDevice dst = findBase(bases, dstId);
+                if (src != null && dst != null)
+                    topo.addLink(new Link(id, src, dst, cap, lat));
             }
         }
 
-        // ========================
-        // 3. Load Services
-        // ========================
+        // ========= 3. Load Services =========
         List<ServiceModule> services = new ArrayList<>();
-        Map<String, ServiceModule> serviceMap = new HashMap<>();
-
-        try (BufferedReader br = new BufferedReader(new FileReader("services.csv"))) {
-            String line = br.readLine();
+        try (BufferedReader br = Files.newBufferedReader(Paths.get(datasetDir, "services_extended.csv"))) {
+            String header = br.readLine();
+            String line;
             while ((line = br.readLine()) != null) {
-                String[] parts = line.split(",");
-                ServiceModule s = new ServiceModule(parts[0],
-                        Integer.parseInt(parts[1]),
-                        Integer.parseInt(parts[2]),
-                        Integer.parseInt(parts[3]),
-                        Integer.parseInt(parts[4]));
-                services.add(s);
-                serviceMap.put(s.getName(), s);
+                String[] v = line.split(",");
+                String id = v[0];
+                double cpu = Double.parseDouble(v[1]);
+                double mem = Double.parseDouble(v[2]);
+                double cost = Double.parseDouble(v[7]); // Execution_Cost
+                double latency = Double.parseDouble(v[4]); // VM_Fixed_Latency_ms
+                ServiceModule svc = new ServiceModule(id, cpu, mem, cost, latency);
+                services.add(svc);
             }
         }
 
-        // ========================
-        // 4. Load Communication Demands
-        // ========================
+        // ========= 4. Load User Requests (optional demonstration) =========
+        // You can later extend this to model per-user demands, offloading decisions, etc.
+        List<String> userLines = Files.readAllLines(Paths.get(datasetDir, "user_requests_extended.csv"));
+        System.out.println("Loaded " + (userLines.size() - 1) + " user requests");
+
+        // ========= 5. Generate simple communication demands =========
         List<CommDemand> commDemands = new ArrayList<>();
-
-        try (BufferedReader br = new BufferedReader(new FileReader("demands.csv"))) {
-            String line = br.readLine();
-            while ((line = br.readLine()) != null) {
-                String[] parts = line.split(",");
-                ServiceModule from = serviceMap.get(parts[0]);
-                ServiceModule to = serviceMap.get(parts[1]);
-                int bw = Integer.parseInt(parts[2]);
-                commDemands.add(new CommDemand(from, to, bw));
-            }
+        Random rand = new Random(42);
+        for (int i = 0; i < services.size() - 1; i++) {
+            ServiceModule sA = services.get(i);
+            ServiceModule sB = services.get(i + 1);
+            commDemands.add(new CommDemand(sA, sB, rand.nextInt(50) + 10));
         }
 
-        // ========================
-        // 5. Solve LP and Randomized Rounding
-        // ========================
+        // ========= 6. Solve JSPRR (ILP + Rounding) =========
         ILPFormulation ilp = new ILPFormulation();
         double[][] x = ilp.solveLP(bases, services);
 
@@ -104,29 +94,26 @@ public class MainJSPRRSimulation {
         RandomizedRounding rr = new RandomizedRounding();
         PlacementResult placement = rr.roundWithRouting(x, bases, services, commDemands, topo);
 
-        // ========================
-        // 6. Print Final Placement
-        // ========================
+        // ========= 7. Print final placement =========
         System.out.println("\nFinal placement:");
         for (ServiceModule s : services) {
             BaseStationDevice b = placement.getBase(s);
             System.out.println(s.getName() + " -> " + (b != null ? b.getName() : "NOT PLACED"));
         }
 
-        // ========================
-        // 7. Print Link Usage
-        // ========================
+        // ========= 8. Print link usage =========
         System.out.println("\nLink usages:");
         for (Link l : topo.getLinks()) {
-            System.out.printf("%s (%s-%s): used %.2f / cap %.2f\n",
+            System.out.printf("%s (%s-%s): used %.2f / cap %.2f%n",
                     l.getId(), l.getA().getName(), l.getB().getName(),
                     l.getUsedBandwidth(), l.getCapacity());
         }
+    }
 
-        // ========================
-        // 8. Evaluation Metrics
-        // ========================
-        EvaluationMetrics metrics = new EvaluationMetrics(bases, topo.getLinks(), placement);
-        metrics.printMetrics();
+    private static BaseStationDevice findBase(List<BaseStationDevice> list, String id) {
+        for (BaseStationDevice b : list)
+            if (b.getName().equalsIgnoreCase(id))
+                return b;
+        return null;
     }
 }
